@@ -19,7 +19,6 @@ export async function mount(root, ctx) {
     const node = doc.createElement(tag)
     for (const [key, value] of Object.entries(attrs)) {
       if (key === 'innerHTML' || key === 'outerHTML') continue // S1：禁止直接注入 HTML
-    for (const [key, value] of Object.entries(attrs)) {
       if (key.startsWith('on')) node.addEventListener(key.slice(2), value)
       else if (key in node && key !== 'list') node[key] = value
       else node.setAttribute(key, value)
