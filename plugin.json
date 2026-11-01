@@ -1,0 +1,40 @@
+{
+  "schema_version": 3,
+  "id": "dian115.missing-subscribe",
+  "name": "缺集自动订阅",
+  "version": "1.0.0",
+  "description": "按多条规则筛选宿主缺集结果，自动创建或合并聚合订阅，支持试运行、审核队列与观察期。",
+  "requires": { "api": "3.2" },
+  "icon": "ui/icon.svg",
+  "ui": { "entry": "ui/page.js" },
+  "menu": { "title": "缺集自动订阅", "order": 40 },
+  "settings": [
+    { "key": "auto_enabled", "label": "开启自动运行", "type": "boolean", "default": false, "help": "关闭时定时和扫描完成事件都不会提交订阅，手动运行不受影响" },
+    { "key": "max_per_run", "label": "单轮最多订阅", "type": "number", "default": 20, "help": "超出的留到下一轮" },
+    { "key": "cooldown_days", "label": "失败重试冷却（天）", "type": "number", "default": 7 },
+    { "key": "throttle_ms", "label": "订阅间隔（毫秒）", "type": "number", "default": 1500 },
+    { "key": "notify_enabled", "label": "发送结果通知", "type": "boolean", "default": true },
+    { "key": "notify_channel", "label": "通知渠道", "type": "select", "default": "all", "options": [
+      { "label": "全部渠道", "value": "all" }, { "label": "Telegram", "value": "telegram" }, { "label": "企业微信", "value": "wecom" }
+    ] }
+  ],
+  "jobs": [
+    { "id": "run", "title": "缺集自动订阅", "entry": "jobs/run.js", "handler": "run", "recover": "recover", "timeout_seconds": 3600, "interval_seconds": 3600 },
+    { "id": "preview", "title": "规则试运行", "entry": "jobs/run.js", "handler": "preview", "timeout_seconds": 1800, "queue": false }
+  ],
+  "events": [
+    { "event": "host", "job": "run", "types": ["library_missing_scan"] },
+    { "event": "callback", "job": "run" }
+  ],
+  "declared_usage": {
+    "apis": [
+      "GET /api/emby-manager/missing/report", "GET /api/plugin-host/emby/instances", "GET /api/plugin-host/emby/libraries",
+      "GET /api/plugin-host/emby/items", "GET /api/plugin-host/emby/episodes", "GET /api/tmdb/tv/{id}",
+      "GET /api/subscribe/pool/intents", "POST /api/subscribe/pool/intents", "PATCH /api/subscribe/pool/intents/{id}/episodes"
+    ],
+    "sites": [],
+    "files": [],
+    "notifications": true,
+    "risk": "按用户规则创建或合并聚合订阅；自动运行默认关闭；读取缺集结果会让宿主校准读到的剧集"
+  }
+}
