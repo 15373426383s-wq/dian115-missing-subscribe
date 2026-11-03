@@ -54,21 +54,15 @@ export function firstMatch(rules, c) {
 export const needsLibraries = rules => rules.some(r => r.enabled !== false && has(r.match?.library_ids))
 
 // 决定对已有订阅怎么做。POST 会覆盖宿主的订阅快照，所以进行中的订阅只能 PATCH。
-export function planIntent(c, intent, entry, { now, cooldown_days, patch_follow = true }) {
-  const maxNeeded = c.needed.reduce((m, n) => n > m ? n : m, 0)
-  if (c.total > 0 && maxNeeded > c.total) return { kind: 'skip', reason: '集号延续上季，宿主订阅按季内集号处理，需手动订阅' }
+export function planIntent(c, intent, entry, { now, cooldown_days }) {
+  if (c.total > 0 && Math.max(...c.needed) > c.total) return { kind: 'skip', reason: '集号延续上季，宿主订阅按季内集号处理，需手动订阅' }
   if (!intent) return { kind: 'create' }
   if (intent.is_upgrade === 1) return { kind: 'skip', reason: '已有洗版订阅' }
   const owned = entry?.intent_id === intent.id
   if (!CLOSED_STATES.has(intent.state)) {
-    if (owned) {
-      if (ACTIVE_LOCKED_STATES.has(intent.state)) return { kind: 'skip', reason: '订阅正在转存，下轮再合并' }
-      return { kind: 'patch' }
-    }
-    // 他人的订阅：仅当它是“追剧(follow)”订阅且开启合并时，把缺失的过往集并入，不碰固定(fixed)订阅。
-    const isFollow = intent.episode_scope_mode === 'follow' || intent.scope === 'follow'
-    if (patch_follow && isFollow && !ACTIVE_LOCKED_STATES.has(intent.state)) return { kind: 'patch', owner: 'other-follow' }
-    return { kind: 'skip', reason: '已有你自己的订阅' }
+    if (!owned) return { kind: 'skip', reason: '已有你自己的订阅' }
+    if (ACTIVE_LOCKED_STATES.has(intent.state)) return { kind: 'skip', reason: '订阅正在转存，下轮再合并' }
+    return { kind: 'patch' }
   }
   if (!owned && intent.state !== 'landed') return { kind: 'skip', reason: '已有你自己的失败订阅' }
   const last = Date.parse(entry?.last_action_at || '') || 0

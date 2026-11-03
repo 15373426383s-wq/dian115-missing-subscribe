@@ -4,7 +4,7 @@ export const styles = `
  --tint:rgba(255,255,255,.46);--tint-strong:rgba(255,255,255,.66);--edge:rgba(255,255,255,.78);--edge-low:rgba(255,255,255,.2);
  --shade:rgba(24,32,56,.14);--ok:#17915f;--warn:#b86e00;--bad:#d03a4b;
  --r-xl:30px;--r-l:22px;--r-m:16px;--r-s:11px;
- position:relative;isolation:isolate;display:flex;flex-direction:column;min-height:100%;box-sizing:border-box;padding:24px 28px 18px;color:var(--ink);
+ position:relative;isolation:isolate;display:flex;flex-direction:column;min-height:100%;height:100%;box-sizing:border-box;padding:24px 28px 18px;color:var(--ink);
  font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Noto Sans CJK SC",sans-serif;overflow:hidden}
 .ms[data-mode=dark]{--tint:rgba(44,48,60,.42);--tint-strong:rgba(52,57,70,.68);--edge:rgba(255,255,255,.3);--edge-low:rgba(255,255,255,.08);
  --shade:rgba(0,0,0,.42);--ok:#4cd39b;--warn:#ffb74d;--bad:#ff7686}
@@ -42,7 +42,7 @@ export const styles = `
 .ms-btn.primary{color:#fff;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 86%,#fff),var(--accent));box-shadow:inset 0 1px 0 rgba(255,255,255,.5),0 8px 20px -8px var(--accent)}
 .ms-btn.small{min-height:32px;padding:0 13px;font-size:13px}
 .ms-btn.danger{color:var(--bad)}
-.ms-content{flex:1}
+.ms-content{flex:1;min-height:0;overflow-y:auto}
 .ms-dock-wrap{position:sticky;bottom:18px;z-index:20;display:flex;justify-content:center;margin-top:28px;pointer-events:none}
 .ms-dock{pointer-events:auto;display:flex;gap:2px;padding:5px;border-radius:999px;max-width:100%;overflow-x:auto;scrollbar-width:none}
 .ms-pill{position:absolute;top:5px;bottom:5px;left:0;border-radius:999px;background:var(--tint-strong);box-shadow:inset 0 1px 0 var(--edge),0 3px 10px -3px var(--shade);transition:transform .42s cubic-bezier(.3,1.35,.45,1),width .42s cubic-bezier(.3,1.35,.45,1)}

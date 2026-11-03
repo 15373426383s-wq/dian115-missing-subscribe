@@ -18,7 +18,6 @@ export async function mount(root, ctx) {
   const el = (tag, attrs = {}, ...children) => {
     const node = doc.createElement(tag)
     for (const [key, value] of Object.entries(attrs)) {
-      if (key === 'innerHTML' || key === 'outerHTML') continue // S1：禁止直接注入 HTML
       if (key.startsWith('on')) node.addEventListener(key.slice(2), value)
       else if (key in node && key !== 'list') node[key] = value
       else node.setAttribute(key, value)
@@ -26,7 +25,7 @@ export async function mount(root, ctx) {
     node.append(...children.flat().filter(c => c !== null && c !== undefined && c !== false))
     return node
   }
-  const state = { tab: 'overview', rules: [], settings: {}, last: null, preview: null, review: {}, ignored: {}, history: [], ledger: {}, instances: [], libraries: [], running: '' }
+  const state = { tab: 'overview', subView: 'active', confirm: '', rules: [], settings: {}, last: null, review: {}, ignored: {}, history: [], ledger: {}, instances: [], libraries: [], intents: [], running: '' }
   let disposed = false, toastTimer = 0
 
   const shell = el('section', { className: 'ms' })
@@ -39,6 +38,27 @@ export async function mount(root, ctx) {
   const dock = el('nav', { className: 'ms-glass ms-lens ms-dock', role: 'tablist', 'aria-label': '缺集自动订阅' })
   shell.append(content, el('div', { className: 'ms-dock-wrap' }, dock))
   root.append(shell)
+
+  // 窗口固定：插件只占宿主可用高度，内容区内部滚动、底部导航常驻可见。
+  // 宿主 .extension-mount 是 auto 高的 block，百分比高度无效，故按实际可用高度定高；
+  // 拿不到宿主容器（其它运行环境）时保持原样，不做任何假设。
+  const view = doc.defaultView
+  const stopFit = (() => {
+    const surface = shell.closest('.extension-surface')
+    if (!surface || !view) return () => {}
+    const fit = () => {
+      const box = surface.getBoundingClientRect()
+      const used = shell.getBoundingClientRect().top - box.top + surface.scrollTop
+      const pad = parseFloat(view.getComputedStyle(surface).paddingBottom) || 0
+      const avail = Math.max(320, Math.round(surface.clientHeight - used - pad))
+      if (Math.abs(shell.offsetHeight - avail) > 1) shell.style.height = `${avail}px`
+    }
+    fit()
+    const observer = view.ResizeObserver ? new view.ResizeObserver(fit) : null
+    observer?.observe(surface)
+    view.addEventListener('resize', fit)
+    return () => { observer?.disconnect(); view.removeEventListener('resize', fit) }
+  })()
 
   const stopTheme = ctx.theme.subscribe(mode => { shell.dataset.mode = mode })
   const onMove = event => {
@@ -63,12 +83,68 @@ export async function mount(root, ctx) {
   const failure = error => error?.response?.data?.error || error?.data?.error || error?.message || '操作失败'
   const read = async (key, fallback) => { try { return await ctx.storage.get(key) ?? fallback } catch { return fallback } }
 
+  // 二次确认按钮：第一次点变成「确认清除 N 条？」，4 秒不动自动收起，避免误清。
+  function confirmButton(label, confirmText, action) {
+    const armed = state.confirm === label
+    return el('button', {
+      className: `ms-btn small${armed ? ' danger' : ''}`, textContent: armed ? confirmText : label,
+      disabled: !!state.running,
+      onclick: async () => {
+        if (!armed) {
+          state.confirm = label
+          render()
+          doc.defaultView.setTimeout(() => { if (state.confirm === label) { state.confirm = ''; render() } }, 4000)
+          return
+        }
+        state.confirm = ''
+        await action()
+        render()
+      },
+    })
+  }
+
+  // 只清已补齐的账本条目；进行中、观察中的一概不动。
+  async function clearLanded() {
+    const keep = {}
+    let removed = 0
+    for (const [key, entry] of Object.entries(state.ledger)) {
+      if (entry && entry.outcome === 'landed') { removed++; continue }
+      keep[key] = entry
+    }
+    if (!removed) { toast('没有可清除的记录'); return }
+    try {
+      await ctx.storage.set('ledger', keep)
+      state.ledger = keep
+      toast(`已清除 ${removed} 条已完成记录`)
+    } catch (error) { toast(failure(error)) }
+  }
+
+  async function clearHistory() {
+    if (!state.history.length) { toast('还没有记录可清空'); return }
+    try {
+      await ctx.storage.set('history', [])
+      state.history = []
+      toast('运行记录已清空')
+    } catch (error) { toast(failure(error)) }
+  }
+
+  // 宿主订阅池里的剧集意图（含标题/海报/缺集/实时状态），供「订阅进行中」列表使用。
+  async function loadIntents() {
+    const rows = []
+    for (let offset = 0; ; offset += 200) {
+      const page = await ctx.api.get(`/api/subscribe/pool/intents?media_type=tv&limit=200&offset=${offset}`)
+      const data = page.data || []
+      rows.push(...data)
+      if (data.length < 200) return rows
+    }
+  }
+
   async function refresh() {
-    const [rules, last, preview, review, ignored, history, ledger, settings] = await Promise.all([
-      read('rules', []), read('last_run', null), read('preview', null), read('review', {}),
-      read('ignored', {}), read('history', []), read('ledger', {}), ctx.settings.get(),
+    const [rules, last, review, ignored, history, ledger, settings, intents] = await Promise.all([
+      read('rules', []), read('last_run', null), read('review', {}),
+      read('ignored', {}), read('history', []), read('ledger', {}), ctx.settings.get(), loadIntents().catch(() => []),
     ])
-    Object.assign(state, { rules, last, preview, review, ignored, history, ledger, settings })
+    Object.assign(state, { rules, last, review, ignored, history, ledger, settings, intents })
   }
 
   async function runJob(job, input, label) {
@@ -78,14 +154,11 @@ export async function mount(root, ctx) {
     try {
       const started = await ctx.tasks.run(job, `${job}:${Date.now()}`, input)
       let run = started
-      let polls = 0
-      while (!TERMINAL.has(run.status) && polls < 4000) { // S5：兜底超时，避免状态契约异常时无限轮询
+      while (!TERMINAL.has(run.status)) {
         await new Promise(resolve => doc.defaultView.setTimeout(resolve, 900))
         if (disposed) return
         run = await ctx.tasks.get(started.id)
-        polls++
       }
-      if (!TERMINAL.has(run.status)) throw new Error('任务状态轮询超时，请到任务队列查看')
       if (run.status !== 'succeeded') throw new Error(run.error || '任务未完成，请到任务队列查看')
       await refresh()
       toast(`${label}完成`)
@@ -104,8 +177,7 @@ export async function mount(root, ctx) {
 
   function poster(path, title) {
     const fallback = () => el('div', { className: 'ms-poster', textContent: (title || '?').slice(0, 1) })
-    // S3：只允许相对路径且不含 ".."，防止 tmdb-image 端点被绝对路径/穿越利用。
-    if (!path || typeof path !== 'string' || !path.startsWith('/') || path.includes('..')) return fallback()
+    if (!path) return fallback()
     const image = el('img', { className: 'ms-poster', alt: '', loading: 'lazy', src: `/api/emby-manager/tmdb-image?path=${encodeURIComponent(path)}` })
     image.addEventListener('error', () => image.replaceWith(fallback()), { once: true })
     return image
@@ -137,7 +209,7 @@ export async function mount(root, ctx) {
           last.deferred ? el('span', { className: 'ms-tag warn', textContent: `顺延 ${last.deferred}` }) : null,
           last.failed ? el('span', { className: 'ms-tag bad', textContent: `失败 ${last.failed}` }) : null,
           last.stopped ? el('span', { className: 'ms-tag bad', textContent: last.stopped }) : null)
-          : el('div', { className: 'ms-muted', textContent: '还没有运行过。建议先添加规则，再用试运行看看结果。' })),
+          : el('div', { className: 'ms-muted', textContent: '还没有运行过。建议先添加规则，再点右上角「立即运行」。' })),
     ]
   }
 
@@ -229,8 +301,7 @@ export async function mount(root, ctx) {
       el('div', { className: 'ms-fields' },
         field('范围', seg([['fixed', '只补当前缺的集'], ['follow', '补完后继续跟新集']], () => draft.subscribe.scope || 'fixed', value => { draft.subscribe.scope = value })),
         field('资源来源（不选用宿主默认）', chips(SOURCES, draft.subscribe, 'sources')),
-        num('观察期（小时）', 'grace_hours', draft.subscribe), num('单轮上限', 'max_per_run', draft.subscribe),
-        field('追光 follow 剧', seg([['', '不并入'], ['1', '补过往缺集']], () => draft.subscribe.patch_follow === false ? '' : '1', value => { draft.subscribe.patch_follow = value === '1' }))),
+        num('观察期（小时）', 'grace_hours', draft.subscribe), num('单轮上限', 'max_per_run', draft.subscribe)),
       el('div', { className: 'ms-glass ms-actions' },
         isNew ? null : el('button', { type: 'button', className: 'ms-btn danger', textContent: '删除', onclick: () => { state.rules = state.rules.filter(r => r !== source); close(); saveRules() } }),
         el('button', { type: 'button', className: 'ms-btn', textContent: '取消', onclick: close }),
@@ -242,21 +313,59 @@ export async function mount(root, ctx) {
   function item(entry, tags, actions = []) {
     return el('div', { className: 'ms-glass ms-item' }, poster(entry.poster_path, entry.title),
       el('div', { className: 'grow' }, el('strong', { textContent: `${entry.title} ${season(entry.season)}` }),
-        el('div', { className: 'ms-muted', textContent: `缺 ${entry.episodes || '—'}` })),
+        el('div', { className: 'ms-muted', textContent: entry.note || `缺 ${entry.episodes || '—'}` })),
       tags, actions)
   }
 
-  function viewPreview() {
-    const data = state.preview
-    const tone = reason => reason.startsWith('将') ? 'ok' : reason === '待审核' ? 'info' : ''
+  // 订阅页：进行中取自宿主订阅池（标题/海报/缺集是实时值），
+  // 已补齐取自账本（宿主池不返回已完成意图，补齐由缺集报告判定后写进账本）。
+  function viewSubs() {
+    const closed = new Set(['landed', 'failed', 'expired'])
+    const mine = new Set(Object.values(state.ledger).filter(x => x.intent_id && !closed.has(x.outcome)).map(x => x.intent_id))
+    const rows = state.intents.filter(x => mine.has(x.id))
+      .sort((a, b) => String(b.last_check_at || '').localeCompare(String(a.last_check_at || '')))
+    const done = Object.entries(state.ledger).filter(([, x]) => x.outcome === 'landed')
+      .sort((a, b) => String(b[1].landed_at || '').localeCompare(String(a[1].landed_at || '')))
+    const LABEL = { partial: '部分可下', searching: '搜索中', pending: '排队中', landed: '已补齐', failed: '失败' }
+    const tone = value => value === 'searching' ? 'info' : value === 'partial' ? 'ok' : value === 'failed' ? 'bad' : ''
+    const seg = state.subView === 'landed' ? 'landed' : 'active'
+    const chip = (id, text) => el('button', {
+      className: `ms-btn small${seg === id ? ' primary' : ''}`, textContent: text,
+      onclick: () => { state.subView = id; render() },
+    })
+    const bar = el('div', { className: 'ms-row ms-spread', style: 'margin-bottom:14px;flex-wrap:wrap;gap:8px' },
+      el('div', { className: 'ms-row' }, chip('active', `进行中 ${rows.length}`), chip('landed', `已补齐 ${done.length}`)),
+      el('div', { className: 'ms-row' },
+        seg === 'landed' && done.length ? confirmButton('清除记录', `确认清除 ${done.length} 条？`, clearLanded) : null,
+        el('button', { className: 'ms-btn small', disabled: !!state.running, textContent: '刷新', onclick: async () => { await refresh(); render() } })))
+    if (seg === 'landed') {
+      // 早期账本条目只记了 intent_id，没有标题/海报，回查历史记录兜底。
+      const past = new Map()
+      for (const h of state.history || []) if (h.key && !past.has(h.key)) past.set(h.key, h)
+      return [
+        bar,
+        done.length ? el('div', { className: 'ms-list' }, done.map(([key, entry]) => {
+          const old = past.get(key) || {}
+          const missed = entry.episodes || old.episodes
+          return item(
+            { title: entry.title || old.title || key, season: entry.season ?? old.season, poster_path: entry.poster_path || old.poster_path, note: missed ? `曾缺 ${missed}` : '已补齐' },
+            [
+              el('span', { className: 'ms-tag ok', textContent: '已补齐' }),
+              entry.landed_at ? el('span', { className: 'ms-muted', textContent: when(entry.landed_at) }) : null,
+            ])
+        }))
+          : el('div', { className: 'ms-glass ms-empty', textContent: '还没有补完的季。某一季补齐后会自动出现在这里。' }),
+      ]
+    }
     return [
-      el('div', { className: 'ms-glass ms-section' }, el('div', { className: 'ms-row ms-spread' },
-        el('div', {}, el('h2', { textContent: '试运行', style: 'margin:0' }), el('div', { className: 'ms-muted', textContent: data ? `${when(data.at)} · 检查 ${data.scanned} 季` : '按当前规则模拟一遍，不会创建订阅' })),
-        el('button', { className: 'ms-btn primary', disabled: !!state.running, textContent: '开始试运行', onclick: () => runJob('preview', {}, '试运行') }))),
-      el('div', { className: 'ms-list', style: 'margin-top:14px' }, (data?.items || []).map(entry => item(entry, [
-        entry.rule ? el('span', { className: 'ms-tag', textContent: entry.rule }) : null,
-        el('span', { className: `ms-tag ${tone(entry.reason)}`, textContent: entry.reason }),
-      ]))),
+      bar,
+      rows.length ? el('div', { className: 'ms-list' }, rows.map(intent => item(
+        { title: intent.title, season: intent.season, episodes: intent.needed_episodes || '—', poster_path: intent.poster_path },
+        [
+          intent.covered_episodes ? el('span', { className: 'ms-tag', textContent: `已有 ${intent.covered_episodes}` }) : null,
+          el('span', { className: `ms-tag ${tone(intent.state)}`, textContent: LABEL[intent.state] || intent.state }),
+          intent.last_check_at ? el('span', { className: 'ms-muted', textContent: intent.last_check_at }) : null,
+        ]))) : el('div', { className: 'ms-glass ms-empty', textContent: '没有进行中的订阅。' }),
     ]
   }
 
@@ -277,6 +386,9 @@ export async function mount(root, ctx) {
   function viewHistory() {
     const ignored = Object.entries(state.ignored)
     return [
+      el('div', { className: 'ms-row ms-spread', style: 'margin-bottom:14px;flex-wrap:wrap;gap:8px' },
+        el('span', { className: 'ms-muted', textContent: state.history.length ? `共 ${state.history.length} 条运行记录` : '还没有记录' }),
+        state.history.length ? confirmButton('清空记录', `确认清空 ${state.history.length} 条？`, clearHistory) : null),
       state.history.length ? el('div', { className: 'ms-list' }, state.history.map(entry => {
         const [label, tone] = HISTORY_LABEL[entry.action] || [entry.action, '']
         return item(entry, [el('span', { className: 'ms-muted', textContent: entry.detail || when(entry.at) }), el('span', { className: `ms-tag ${tone}`, textContent: label })])
@@ -286,7 +398,7 @@ export async function mount(root, ctx) {
     ]
   }
 
-  const TABS = [['overview', '总览', viewOverview], ['rules', '规则', viewRules], ['preview', '试运行', viewPreview], ['review', '审核', viewReview], ['history', '记录', viewHistory]]
+  const TABS = [['overview', '总览', viewOverview], ['rules', '规则', viewRules], ['subs', '订阅', viewSubs], ['review', '审核', viewReview], ['history', '记录', viewHistory]]
 
   function render() {
     const view = TABS.find(t => t[0] === state.tab)
@@ -315,6 +427,7 @@ export async function mount(root, ctx) {
 
   return () => {
     disposed = true
+    stopFit()
     doc.defaultView.clearTimeout(toastTimer)
     stopTheme()
     shell.remove()

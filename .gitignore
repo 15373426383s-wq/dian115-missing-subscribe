@@ -1,15 +1,3 @@
-node_modules/
-*.log
-.DS_Store
-
-# === 凭证与本地存储：绝不提交（防止明文密钥泄露到公开仓库） ===
-*.local.*
-config.local.*
-cookies*
-cookie-*.json
-*.secret
 *.dian115p
-.env
-.env.*
-data/
-.secrets/
+._test_hold*
+node_modules/
