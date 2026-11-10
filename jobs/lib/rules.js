@@ -56,7 +56,12 @@ export const needsLibraries = rules => rules.some(r => r.enabled !== false && ha
 // 决定对已有订阅怎么做。POST 会覆盖宿主的订阅快照，所以进行中的订阅只能 PATCH。
 export function planIntent(c, intent, entry, { now, cooldown_days }) {
   if (c.total > 0 && Math.max(...c.needed) > c.total) return { kind: 'skip', reason: '集号延续上季，宿主订阅按季内集号处理，需手动订阅' }
-  if (!intent) return { kind: 'create' }
+  if (!intent) {
+    // 上一轮创建失败过也不能每轮重试：按 cooldown_days 冷却，避免刷宿主接口。
+    const lastFail = Date.parse(entry?.last_failure_at || '') || 0
+    if (lastFail && now - lastFail < cooldown_days * 86400000) return { kind: 'skip', reason: `上次创建失败，冷却中（${cooldown_days} 天）` }
+    return { kind: 'create' }
+  }
   if (intent.is_upgrade === 1) return { kind: 'skip', reason: '已有洗版订阅' }
   const owned = entry?.intent_id === intent.id
   if (!CLOSED_STATES.has(intent.state)) {

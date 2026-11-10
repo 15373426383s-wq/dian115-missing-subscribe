@@ -89,10 +89,13 @@ async function createIntent(ctx, c, rule, needed, owned) {
 async function mergeIntent(ctx, intent, c, needed) {
   const merged = [...new Set([...parseEpisodes(intent.needed_episodes), ...needed])]
   if (merged.length === parseEpisodes(intent.needed_episodes).length) return null
-  const covered = minusEpisodes(fullSeason(c.total), merged)
-  return (await ctx.api.patch(`/api/subscribe/pool/intents/${intent.id}/episodes`, {
-    needed_episodes: formatEpisodes(merged), covered_episodes: formatEpisodes(covered), total_episodes: c.total,
-  })).data
+  // total 未知（0）时不回写 covered/total：空串会把宿主已有的覆盖集数清掉。
+  const body = { needed_episodes: formatEpisodes(merged) }
+  if (c.total > 0) {
+    body.covered_episodes = formatEpisodes(minusEpisodes(fullSeason(c.total), merged))
+    body.total_episodes = c.total
+  }
+  return (await ctx.api.patch(`/api/subscribe/pool/intents/${intent.id}/episodes`, body)).data
 }
 
 function hostErrorCode(error) { return error?.data?.code || '' }
@@ -190,6 +193,19 @@ async function evaluate(ctx, input, dryRun) {
   const settings = await ctx.settings.get()
   const state = await loadState(ctx)
   const fromCallback = callbackAction(input)
+  // 按钮回调会批量建订阅：配置了「按钮批准人」时只认名单内的人；留空表示不做限制（适合单人/私有群自用）。
+  if (fromCallback) {
+    const admins = String(settings.callback_admins || '').split(/[,，\s]+/).map(s => s.trim()).filter(Boolean)
+    const fromUser = String(input.user_id || input.channel_user_id || '')
+    if (admins.length) {
+      if (!admins.includes(fromUser)) {
+        await ctx.task.log(`用户 ${fromUser || '未知'} 不在按钮批准人名单，已忽略`)
+        return { skipped: '按钮操作被拒绝：不在批准人名单' }
+      }
+    } else {
+      await ctx.task.log(`按钮操作来自 ${fromUser || '未知'}（未配置批准人名单，按自用不做限制）`)
+    }
+  }
   const action = fromCallback === 'ignore-all' ? 'ignore' : input.action
   if (action === 'ignore' || action === 'unignore') return applyQueueAction(ctx, input, state, action)
   const approveAll = fromCallback === 'approve-all'
@@ -268,12 +284,16 @@ async function evaluate(ctx, input, dryRun) {
       if (plan.kind === 'patch') result.merged++
       result.subscribed.push({ title: c.title, season: c.season, episodes: formatEpisodes(live.needed) })
       record(state, c, plan.kind === 'patch' ? 'merged' : 'subscribed', '', rule)
+      // 每次都落盘账本：任务中途崩溃时，下一轮才不会把已建好的订阅再建一遍。
+      await saveState(ctx, state)
       await ctx.sleep(Number(settings.throttle_ms) || 0)
     } catch (error) {
       const code = hostErrorCode(error)
       if (code === 'no_episodes_needed' || code === 'duplicate') { result.skipped++; continue }
       result.failed++
+      entry.last_failure_at = new Date().toISOString()
       record(state, c, 'failed', error.data?.error || error.message, rule)
+      await saveState(ctx, state)
       await ctx.task.log(`${c.title} S${c.season}：${error.message}`)
       if (code === 'not_premium' || code === 'no_source') stopped = error.data?.error || code
     }
